@@ -43,6 +43,12 @@ FORCED_CORRECTIONS = {
     "Global Goal on adaptation": "global goal on adaptation", #"Global goal on adaptation" if first word in a sentence
     # CTC and CTCN are distinct — do not substitute one for the other
     # (handled via system prompt but also guarded here as a safety net)
+    # "Party" is always capitalised in UNFCCC context — including compound modifiers.
+    # The model treats "party-driven" etc. as generic lowercase; force correct form.
+    "party-driven": "Party-driven",
+    "party-led": "Party-led",
+    "party-centric": "Party-centric",
+    "non-party": "non-Party",
     # Note: "Annex" vs "annex" is context-dependent and cannot be handled here.
     # "Annex" (capital) = annex to the Convention or Kyoto Protocol.
     # "annex" (lower) = annex to any other document.
@@ -62,43 +68,40 @@ PROTECTED_ACRONYMS = {"CTC", "CTCN", "COP", "SBI", "SBSTA", "GCF", "GEF", "CDM",
 
 def protect_acronyms(edited_text: str, original_text: str) -> str:
     """
-    Reverses any acronym substitutions the model made that were not in the original.
-    For each protected acronym that appears in the original, if the model replaced it
-    with a different protected acronym, restore the original.
-    Works at the word level to avoid false positives.
+    Reverses substitutions where the model replaced one protected acronym with
+    a different protected acronym (e.g. CTC → CTCN).
     """
     import re as _re
-    orig_words = _re.findall(r'\b[A-Z]{2,}\b', original_text)
-    edit_words = _re.findall(r'\b[A-Z]{2,}\b', edited_text)
-
-    # Build a mapping of positions where acronyms changed
     result = edited_text
-    for orig_acr in orig_words:
-        if orig_acr in PROTECTED_ACRONYMS:
-            # Check if this acronym was replaced by a different protected acronym
-            # by looking for its absence in edited and presence of a substitute
-            orig_count = original_text.count(orig_acr)
-            edit_count = edited_text.count(orig_acr)
-            if edit_count < orig_count:
-                # Model removed some instances — find what replaced them
-                for sub_acr in PROTECTED_ACRONYMS:
-                    if sub_acr != orig_acr:
-                        sub_count_orig = original_text.count(sub_acr)
-                        sub_count_edit = edited_text.count(sub_acr)
-                        if sub_count_edit > sub_count_orig:
-                            # Model added instances of sub_acr that weren't in original
-                            # Replace the excess back to orig_acr
-                            excess = sub_count_edit - sub_count_orig
-                            replaced = 0
-                            pos = 0
-                            while replaced < excess:
-                                idx = result.find(sub_acr, pos)
-                                if idx == -1:
-                                    break
-                                # Only replace if not in original at this relative position
-                                result = result[:idx] + orig_acr + result[idx + len(sub_acr):]
-                                replaced += 1
-                                pos = idx + len(orig_acr)
+
+    # --- Guard 1: reverse acronym-for-acronym substitutions ---
+    for orig_acr in PROTECTED_ACRONYMS:
+        orig_count = original_text.count(orig_acr)
+        if orig_count == 0:
+            continue
+        edit_count = result.count(orig_acr)
+        if edit_count >= orig_count:
+            continue
+        for sub_acr in PROTECTED_ACRONYMS:
+            if sub_acr == orig_acr:
+                continue
+            sub_count_orig = original_text.count(sub_acr)
+            sub_count_edit = result.count(sub_acr)
+            excess = sub_count_edit - sub_count_orig
+            if excess <= 0:
+                continue
+            if edit_count > 0:
+                continue
+            replaced = 0
+            pos = 0
+            while replaced < excess:
+                idx = result.find(sub_acr, pos)
+                if idx == -1:
+                    break
+                result = result[:idx] + orig_acr + result[idx + len(sub_acr):]
+                replaced += 1
+                pos = idx + len(orig_acr)
+
     return result
 
 
@@ -109,17 +112,19 @@ def protect_acronyms(edited_text: str, original_text: str) -> str:
 # separately in each prompt.
 # ---------------------------------------------------------------------------
 EDITING_INSTRUCTIONS = """Instructions:
-- Correct grammar, syntax, spelling and capitalization.
-- Adjust text for flow and readability.
+- Correct grammar, spelling and capitalization.
+- Improve the quality of the writing: replace imprecise, informal or awkward phrasing with clear, precise and formal language appropriate for an intergovernmental document.
 - Do not add or remove information beyond corrections. Do not delete words, numbers or phrases.
 - Do not include any parts of the style guide in your response.
 - Do not add comments about text completeness.
 - Maintain consistency in terminology within and across paragraphs.
 - Do not remove or alter superscripted ordinal suffixes (e.g. "5th", "3rd" — leave "th" and "rd" exactly as they appear).
 - The first word after an introductory phrase and a colon should be lower-cased unless it is a proper noun or upper-cased in the terminology file (e.g. "Adaptation Fund: at SBI 64..." not "At SBI 64...").
+- ACRONYMS: leave all acronyms exactly as they appear — do not expand, define, or write out the full term.
 - NUMBERS: numbers 9 and below must be written as words (one, two, ... nine); numbers 10 and above as digits. Apply this to every number in the text without exception (e.g. "fifty-six" → "56", "ten" → "10", "three" → "three" [correct, keep], "11" → "11" [correct, keep], "six" → "six" [correct, keep — it is 9 or below]).
-- ACRONYMS: do not substitute one acronym for another under any circumstances. CTC and CTCN are two distinct acronyms — never change one to the other. If an acronym appears in the text, leave it exactly as written unless it is misspelled (wrong letters, wrong case).
 - Do not edit URLs or add any comments about them. Leave URLs exactly as they appear.
+- LIST PUNCTUATION: within a sentence containing a list of items, use consistent separators throughout. If the first separator between items is a semicolon, all subsequent separators must also be semicolons. If the first separator is a comma, all must be commas.
+- "Party" and "Parties" are always capitalised when referring to Parties to the UNFCCC, the Kyoto Protocol or the Paris Agreement — including in compound modifiers such as "Party-driven", "Party-led", "non-Party". Do not lowercase these.
 
 SPELLING — apply United Nations spelling throughout (this is mandatory, check every word):
 - Use -ize not -ise: maximize, organize, prioritize, recognize, finalize, utilize, emphasize, mobilize, stabilize, operationalize, revitalize, familiarize, etc.
@@ -302,40 +307,148 @@ def split_segment_by_rpr(text, start_pos, char_rprs, fallback_rpr):
     return segments
 
 
-def insert_paragraph_revision(original_paragraph, edits, trackchanges_id, rsid_num):
+def is_superscript_run(run_elem):
+    """Returns True if this run has vertAlign superscript or subscript."""
+    ns_uri = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    rpr = run_elem.find(f"{{{ns_uri}}}rPr")
+    if rpr is None:
+        return False
+    vert = rpr.find(f"{{{ns_uri}}}vertAlign")
+    if vert is None:
+        return False
+    return vert.get(f"{{{ns_uri}}}val", "") in ("superscript", "subscript")
+
+
+def build_para_info(paragraph):
+    """
+    Builds everything needed to rebuild a paragraph after editing:
+    - char_rprs: rPr per character of paragraph.text
+    - super_positions: list of (char_pos_after, run_element) for superscript runs,
+      so they can be reinserted after the character they follow
+    - fallback_rpr: most common non-super rPr (for inserted text)
+
+    Uses paragraph.text as the canonical text, matching what the model sees.
+    """
     import copy
-    char_rprs = build_char_rpr_map(original_paragraph)
-    fallback_rpr = get_dominant_rpr(original_paragraph)
+    from collections import Counter
+    ns_uri = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    char_rprs = []
+    super_positions = []  # (char_pos_after, run_element)
+    rpr_counts = Counter()
+    rpr_store = {}
+    pos = 0  # position in paragraph.text
+
+    for run in paragraph.runs:
+        rpr = run._element.find(f"{{{ns_uri}}}rPr")
+        rpr_copy = copy.deepcopy(rpr) if rpr is not None else None
+        run_text = run.text or ""
+
+        if is_superscript_run(run._element):
+            # Superscript run: record its position (after pos), don't add to char_rprs
+            # The text of this run IS in paragraph.text, so we must account for it
+            super_positions.append((pos, run._element, len(run_text)))
+            # We still add chars to char_rprs so positions stay aligned with paragraph.text
+            for _ in run_text:
+                char_rprs.append(rpr_copy)
+            pos += len(run_text)
+        else:
+            key = rpr_key(rpr_copy)
+            rpr_counts[key] += max(len(run_text), 1)
+            if key not in rpr_store:
+                rpr_store[key] = rpr_copy
+            for _ in run_text:
+                char_rprs.append(rpr_copy)
+            pos += len(run_text)
+
+    fallback_rpr = rpr_store[rpr_counts.most_common(1)[0][0]] if rpr_counts else None
+    return char_rprs, super_positions, fallback_rpr
+
+
+def insert_paragraph_revision(original_paragraph, edits, trackchanges_id, rsid_num):
+    """
+    Rebuilds a paragraph from diff edits, preserving per-character formatting
+    and reinserting superscript runs at their correct positions.
+
+    The diff is between paragraph.text (what the model saw) and the edited text,
+    so positions align with char_rprs and super_positions.
+    """
+    import copy
+
+    char_rprs, super_positions, fallback_rpr = build_para_info(original_paragraph)
 
     p_elem = original_paragraph._p
     for child in list(p_elem):
         if child.tag != qn('w:pPr'):
             p_elem.remove(child)
 
-    orig_pos = 0
+    orig_pos = 0  # position in original paragraph.text
+
+    def flush_supers_up_to(target_pos, is_deletion=False):
+        """Reinsert any superscript runs whose start position <= target_pos."""
+        nonlocal super_positions
+        remaining = []
+        for super_start, super_elem, super_len in super_positions:
+            if super_start <= target_pos:
+                if not is_deletion:
+                    p_elem.append(copy.deepcopy(super_elem))
+                # If in a deletion region, we still preserve the super run
+                # (don't delete ordinal suffixes)
+                else:
+                    p_elem.append(copy.deepcopy(super_elem))
+            else:
+                remaining.append((super_start, super_elem, super_len))
+        super_positions[:] = remaining
+
+    def is_super_rpr(rpr_elem):
+        """Check if an rPr element has superscript/subscript vertAlign."""
+        if rpr_elem is None:
+            return False
+        ns_uri = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        vert = rpr_elem.find(f"{{{ns_uri}}}vertAlign")
+        if vert is None:
+            return False
+        return vert.get(f"{{{ns_uri}}}val", "") in ("superscript", "subscript")
 
     for operation, edit in edits:
         if operation == 0:
-            # Unchanged: split at rPr boundaries for correct per-character formatting
             for sub_text, rpr in split_segment_by_rpr(edit, orig_pos, char_rprs, fallback_rpr):
-                p_elem.append(make_run_with_rpr(sub_text, rpr))
-            orig_pos += len(edit)
+                if is_super_rpr(rpr):
+                    # These characters belong to a superscript run.
+                    # Flush the original run element — don't create a new run from the diff.
+                    flush_supers_up_to(orig_pos + len(sub_text) - 1)
+                else:
+                    flush_supers_up_to(orig_pos + len(sub_text) - 1)
+                    p_elem.append(make_run_with_rpr(sub_text, rpr))
+                orig_pos += len(sub_text)
 
         elif operation == -1:
-            # Deletion: split at rPr boundaries
             del_elem = OxmlElement('w:del')
             del_elem.set(qn('w:author'), "UNFCCC_ProofReader")
             del_elem.set(qn('w:date'), datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
             del_elem.set(qn('w:id'), str(trackchanges_id))
+            has_del_content = False
             for sub_text, rpr in split_segment_by_rpr(edit, orig_pos, char_rprs, fallback_rpr):
-                del_elem.append(make_run_with_rpr(sub_text, rpr, del_text=True))
-            p_elem.append(del_elem)
-            trackchanges_id += 1
-            orig_pos += len(edit)
+                if is_super_rpr(rpr):
+                    # Superscript in deleted region — preserve it, don't mark as deleted
+                    if has_del_content:
+                        p_elem.append(del_elem)
+                        trackchanges_id += 1
+                        del_elem = OxmlElement('w:del')
+                        del_elem.set(qn('w:author'), "UNFCCC_ProofReader")
+                        del_elem.set(qn('w:date'), datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
+                        del_elem.set(qn('w:id'), str(trackchanges_id))
+                        has_del_content = False
+                    flush_supers_up_to(orig_pos + len(sub_text) - 1, is_deletion=True)
+                else:
+                    del_elem.append(make_run_with_rpr(sub_text, rpr, del_text=True))
+                    has_del_content = True
+                orig_pos += len(sub_text)
+            if has_del_content:
+                p_elem.append(del_elem)
+                trackchanges_id += 1
 
         elif operation == 1:
-            # Insertion: use rPr of the character immediately before the insertion
-            # point. This prevents bold spreading past a bold lead phrase.
             if orig_pos > 0 and orig_pos - 1 < len(char_rprs):
                 insert_rpr = char_rprs[orig_pos - 1]
             else:
@@ -348,6 +461,10 @@ def insert_paragraph_revision(original_paragraph, edits, trackchanges_id, rsid_n
             p_elem.append(ins_elem)
             trackchanges_id += 1
             rsid_num += 1
+
+    # Flush any remaining superscript runs at the end
+    for _, super_elem, _ in super_positions:
+        p_elem.append(copy.deepcopy(super_elem))
 
     return trackchanges_id, rsid_num
 
@@ -392,11 +509,11 @@ This is the UNFCCC Editorial Style Guide, to be followed at all times:
     
 SESSION NUMBERING AND PREPOSITIONS  
 - When the name of a body is written out, the session number should be written out (e.g., "fiftieth session of the Subsidiary Body for Implementation").
-- When an acronym is used, the session number should be in digits (e.g., "SB 58", "CMP 13", "CMA 7", "COP 28").
+- When an acronym is used, the session number should be in digits, with a space before it (e.g., "SB 58", "CMP 13", "CMA 7", "COP 28").
 - Use "at" before session numbers, not "by" (e.g., "done at CMA 5", not "done by CMA 5").
 
 MEETING NUMBERING
-- Unlike with session numbers, even when the word "meeting" appears, meeting numbers should be in ordinal digits (e.g. "29th meeting of the TEC", "3rd meeting of the PCCB") with the suffixes "th" and "rd" superscripted.
+- Unlike with session numbers, even when the word "meeting" appears, meeting numbers should be in ordinal digits (e.g. "29th meeting of the TEC", "3rd meeting of the PCCB"). Do not alter ordinal suffixes ("th", "rd", "st", "nd") — their formatting is handled separately.
 - If the word "meeting" is omitted, meeting numbers can be written like session numbers (e.g. "TEC 29", "AC 17").
 
 OTHER NUMBERS
@@ -405,18 +522,12 @@ numbers is 10 or larger, all the numbers in that series should be given as digit
 - Ordinal number suffixes (e.g. "th" in "5th") are already superscripted in the document. Do not add, remove or alter superscript formatting on ordinal suffixes.
 
 ABBREVIATIONS AND ACRONYMS
-- Only define abbreviations or acronyms that are not already defined in the document and appear in the terminology file. If already defined in document, do not write them out.
-This means, for example:
-    - If "NDCs" appears just like that on first mention, without a definition, replace it with "nationally determined contributions (NDCs)" (use singular or plural
-    form depending on how used in text. On subsequent mentions, just "NDCs" is ok. But if "nationally determined contributions" is subsequently used, change it to "NDCs".
-- Avoid possessive forms of acronyms (e.g., "SCF’s" → "the SCF co-chairs").
-    - ❌ "SBI's report"
-    - ✅ "SBI report"
+- Leave every acronym exactly as it appears. Do NOT expand, define or write out any acronym — not even on first mention. If "NDCs" appears, leave it as "NDCs". If "CTCN" appears, leave it as "CTCN". No exceptions.
+- Do NOT substitute one acronym for another. CTC and CTCN are distinct — never change one to the other.
+- Avoid possessive forms of acronyms (e.g., "SCF's" → "the SCF co-chairs").
 - "United Nations" should only be abbreviated when part of an official acronym.
-- Acronyms should not be preceded by "the". Exceptions are (only in sentences, not in lists):
-    - UNFCCC, COP, CMP, CMA, SBI, SBSTA, ES, AC, TEC, CTCN, LEG, SCF, CDM, GCF, GEF, LDCF, NWP and IPCC
-    - For example, "the COP" is ok, but "the UNDP" is not (write "UNDP", without "the")
-
+- Acronyms should not be preceded by "the". Exceptions (sentences only, not lists):
+    - UNFCCC, COP, CMP, CMA, SBI, SBSTA, ES, AC, TEC, CTC, CTCN, LEG, SCF, CDM, GCF, GEF, LDCF, NWP and IPCC
 SPELLING  
 - Use United Nations spelling, which follows British spelling, except for "-ize" and "-yse" words. For example:  
     - "organise" → "organize" (use "-ize" endings)  
@@ -662,65 +773,54 @@ def parse_batch_response(response_text: str, indices: list[int]) -> dict[int, st
 
     return result
 
-
-# ---------------------------------------------------------------------------
-# Footnote editing — UNCHANGED from v1
-# ---------------------------------------------------------------------------
-
 def edit_footnote(footnote_paragraph, interface, relevant_terms, consistency_block, system_prompt, trackchanges_id, rsid_num):
+    """
+    Edits plain-text runs in a footnote paragraph while preserving original child order.
+    Strategy: snapshot all children, classify each as pPr/marker/hyperlink/run,
+    send only run text to model, rebuild only the runs in their original position.
+    All other children (pPr, hyperlinks, marker) are preserved in place.
+    """
     import copy
     ns_uri = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     xml_ns = "http://www.w3.org/XML/1998/namespace"
-    ns = {"w": ns_uri}
+    ns_dict = {"w": ns_uri}
 
-    # --- Step 1: save pPr (paragraph properties — indent, style) ---
-    pPr_elem = footnote_paragraph.find(f"{{{ns_uri}}}pPr")
-    pPr_copy = LET.fromstring(LET.tostring(pPr_elem)) if pPr_elem is not None else None
-
-    # --- Step 2: extract footnote marker run ---
-    marker_run = None
-    original_children = list(footnote_paragraph)
-    if original_children:
-        first_run = original_children[0]
-        if (first_run.find(".//w:footnoteReference", namespaces=ns) is not None or
-            first_run.find(".//w:footnoteRef", namespaces=ns) is not None):
-            marker_run = LET.fromstring(LET.tostring(first_run))
-            footnote_paragraph.remove(first_run)
-
-    # --- Step 3: extract hyperlink elements (preserve intact; don't send URL to model) ---
-    hyperlinks = []
+    # Snapshot and classify all children
+    children_info = []  # (element, category)
     for child in list(footnote_paragraph):
         tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-        if tag == 'hyperlink':
-            hyperlinks.append(LET.fromstring(LET.tostring(child)))
-            footnote_paragraph.remove(child)
+        if tag == 'pPr':
+            children_info.append((child, 'pPr'))
+        elif tag == 'hyperlink':
+            children_info.append((child, 'hyperlink'))
+        elif tag == 'r':
+            is_marker = (
+                child.find(".//w:footnoteReference", namespaces=ns_dict) is not None or
+                child.find(".//w:footnoteRef", namespaces=ns_dict) is not None
+            )
+            children_info.append((child, 'marker' if is_marker else 'run'))
+        else:
+            children_info.append((child, 'other'))
 
-    # --- Step 4: capture run formatting BEFORE clearing ---
-    fn_rpr = None
-    for r in footnote_paragraph.findall(f"{{{ns_uri}}}r"):
-        rpr = r.find(f"{{{ns_uri}}}rPr")
-        if rpr is not None:
-            fn_rpr = copy.deepcopy(rpr)
-            break
+    # Extract plain text from run children only
+    original_text = ''.join(
+        ''.join(child.itertext()) for child, cat in children_info if cat == 'run'
+    ).strip()
 
-    # --- Step 5: extract plain text ---
-    original_text = "".join(footnote_paragraph.itertext()).strip()
-
-    # Skip if nothing left to edit (URL-only after removing hyperlinks)
     if not original_text or re.match(r'^https?://\S+$', original_text):
-        # Restore everything untouched
-        for child in list(footnote_paragraph):
-            if child.tag.split('}')[-1] != 'pPr':
-                footnote_paragraph.remove(child)
-        for hl in hyperlinks:
-            footnote_paragraph.append(hl)
-        if marker_run is not None:
-            footnote_paragraph.insert(0, marker_run)
-        return trackchanges_id, rsid_num
+        return trackchanges_id, rsid_num  # nothing editable
 
-    # --- Step 6: send plain text to model ---
+    # Capture run formatting from first non-empty run
+    fn_rpr = None
+    for child, cat in children_info:
+        if cat == 'run':
+            rpr = child.find(f"{{{ns_uri}}}rPr")
+            if rpr is not None:
+                fn_rpr = copy.deepcopy(rpr)
+                break
+
+    # Send plain text to model
     terms_text = f"\n\nRelevant terminology:\n{relevant_terms}" if relevant_terms else ""
-
     response = interface.get_response(prompt=f"""
 Edit the text according to the UNFCCC Editorial Style Guide (in your system prompt).
 
@@ -732,40 +832,38 @@ Text to edit:
 
 {original_text}
 """)
+    edited_text = protect_acronyms(
+        apply_forced_corrections(strip_url_comments(response["text"].strip(), original_text)),
+        original_text
+    )
 
-    edited_text = protect_acronyms(apply_forced_corrections(strip_url_comments(response["text"].strip(), original_text)), original_text)
     dmp = diff_match_patch()
     diffs = dmp.diff_main(original_text, edited_text)
     dmp.diff_cleanupSemantic(diffs)
 
-    # --- Step 7: clear paragraph content (preserve pPr) ---
-    for child in list(footnote_paragraph):
-        if child.tag != f"{{{ns_uri}}}pPr":
-            footnote_paragraph.remove(child)
-
-    # --- Step 8: helper to build a run ---
+    # Build new run elements from diff
     def _fn_run(text_content, del_text=False):
         r = LET.Element(f"{{{ns_uri}}}r")
         if fn_rpr is not None:
             r.append(copy.deepcopy(fn_rpr))
-        tag = f"{{{ns_uri}}}delText" if del_text else f"{{{ns_uri}}}t"
-        t = LET.Element(tag)
+        t_tag = f"{{{ns_uri}}}delText" if del_text else f"{{{ns_uri}}}t"
+        t = LET.Element(t_tag)
         t.set(f"{{{xml_ns}}}space", "preserve")
         t.text = text_content
         r.append(t)
         return r
 
-    # --- Step 9: rebuild edited runs ---
+    new_run_elements = []
     for op, text in diffs:
         if op == 0:
-            footnote_paragraph.append(_fn_run(text))
+            new_run_elements.append(_fn_run(text))
         elif op == 1:
             ins = LET.Element(f"{{{ns_uri}}}ins")
             ins.set(f"{{{ns_uri}}}author", "UNFCCC_ProofReader")
             ins.set(f"{{{ns_uri}}}date", datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
             ins.set(f"{{{ns_uri}}}id", str(trackchanges_id))
             ins.append(_fn_run(text))
-            footnote_paragraph.append(ins)
+            new_run_elements.append(ins)
             trackchanges_id += 1
             rsid_num += 1
         elif op == -1:
@@ -774,42 +872,25 @@ Text to edit:
             deletion.set(f"{{{ns_uri}}}date", datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
             deletion.set(f"{{{ns_uri}}}id", str(trackchanges_id))
             deletion.append(_fn_run(text, del_text=True))
-            footnote_paragraph.append(deletion)
+            new_run_elements.append(deletion)
             trackchanges_id += 1
 
-    # --- Step 10: reinsert hyperlinks after edited text ---
-    for hl in hyperlinks:
-        footnote_paragraph.append(hl)
+    # Rebuild paragraph in original child order:
+    # remove all children, reinsert each in order,
+    # replacing ALL run children with new_run_elements at the position of the first run.
+    for child, _ in children_info:
+        footnote_paragraph.remove(child)
 
-    # --- Step 11: reinsert marker run and tab at the front ---
-    if marker_run is None:
-        parent = footnote_paragraph.getparent()
-        if parent is not None:
-            footnote_id = parent.get(f"{{{ns_uri}}}id")
-            try:
-                footnote_number = str(int(footnote_id) - 1)
-            except Exception:
-                footnote_number = footnote_id
+    first_run_inserted = False
+    for child, cat in children_info:
+        if cat == 'run':
+            if not first_run_inserted:
+                for new_elem in new_run_elements:
+                    footnote_paragraph.append(new_elem)
+                first_run_inserted = True
+            # skip subsequent original run children — replaced by new_run_elements
         else:
-            footnote_number = "?"
-        marker_run = LET.Element(f"{{{ns_uri}}}r")
-        rPr_m = LET.Element(f"{{{ns_uri}}}rPr")
-        vertAlign = LET.Element(f"{{{ns_uri}}}vertAlign")
-        vertAlign.set(f"{{{ns_uri}}}val", "superscript")
-        rPr_m.append(vertAlign)
-        marker_run.append(rPr_m)
-        t_marker = LET.Element(f"{{{ns_uri}}}t")
-        t_marker.set(f"{{{xml_ns}}}space", "preserve")
-        t_marker.text = footnote_number
-        marker_run.append(t_marker)
-
-    footnote_paragraph.insert(0, marker_run)
-    tab_run = LET.Element(f"{{{ns_uri}}}r")
-    tab_text = LET.Element(f"{{{ns_uri}}}t")
-    tab_text.set(f"{{{xml_ns}}}space", "preserve")
-    tab_text.text = "\t"
-    tab_run.append(tab_text)
-    footnote_paragraph.insert(1, tab_run)
+            footnote_paragraph.append(child)
 
     return trackchanges_id, rsid_num
 
